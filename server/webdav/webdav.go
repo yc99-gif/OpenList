@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/conf"
+	"github.com/OpenListTeam/OpenList/v4/internal/db"
 	"github.com/OpenListTeam/OpenList/v4/internal/net"
 	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/setting"
@@ -243,6 +244,11 @@ func (h *Handler) handleGetHeadPost(w http.ResponseWriter, r *http.Request) (sta
 	if err != nil {
 		return http.StatusNotFound, err
 	}
+	if metadata, found, metadataErr := db.GetWebDAVMetadata(ctx, reqPath); metadataErr != nil {
+		return http.StatusInternalServerError, metadataErr
+	} else if found {
+		fi = applyWebDAVMetadata(ctx, reqPath, fi, metadata)
+	}
 	if fi.IsDir() {
 		if r.Method == http.MethodHead {
 			w.Header().Set("Content-Type", "httpd/unix-directory")
@@ -373,11 +379,12 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request) (status int,
 			}
 		}
 	}
+	times := h.getRequestTimes(r)
 	obj := model.Object{
 		Name:     path.Base(reqPath),
 		Size:     size,
-		Modified: h.getModTime(r),
-		Ctime:    h.getCreateTime(r),
+		Modified: times.modTime,
+		Ctime:    times.createTime,
 	}
 	// Check if system file should be ignored
 	if setting.GetBool(conf.IgnoreSystemFiles) && utils.IsSystemFile(obj.Name) {
@@ -414,6 +421,19 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request) (status int,
 	fi, err := fs.Get(ctx, reqPath, &fs.GetArgs{})
 	if err != nil {
 		fi = &obj
+	}
+	if times.hasModTime || times.hasCreateTime {
+		metadata := newWebDAVMetadata(reqPath, fi)
+		metadata.ModTime = times.modTime.Unix()
+		metadata.CreateTime = times.createTime.Unix()
+		metadata.HasModTime = times.hasModTime
+		metadata.HasCreateTime = times.hasCreateTime
+		if err = db.UpsertWebDAVMetadata(ctx, &metadata); err != nil {
+			return http.StatusInternalServerError, err
+		}
+		fi = applyWebDAVMetadata(ctx, reqPath, fi, &metadata)
+	} else if err = db.DeleteWebDAVMetadata(ctx, reqPath); err != nil {
+		return http.StatusInternalServerError, err
 	}
 	etag, err := findETag(ctx, h.LockSystem, reqPath, fi)
 	if err != nil {
@@ -749,12 +769,22 @@ func (h *Handler) handlePropfind(w http.ResponseWriter, r *http.Request) (status
 	if err != nil {
 		return status, err
 	}
+	metadataByPath := map[string]model.WebDAVMetadata{}
+	if pf.Propname == nil {
+		metadataByPath, err = loadWebDAVMetadata(ctx, reqPath, depth)
+		if err != nil {
+			return http.StatusInternalServerError, err
+		}
+	}
 
 	mw := multistatusWriter{w: w}
 
 	walkFn := func(reqPath string, info model.Obj, err error) error {
 		if err != nil {
 			return err
+		}
+		if metadata, ok := metadataByPath[slashClean(reqPath)]; ok {
+			info = applyWebDAVMetadata(ctx, reqPath, info, &metadata)
 		}
 		var pstats []Propstat
 		if pf.Propname != nil {
