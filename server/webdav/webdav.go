@@ -847,7 +847,8 @@ func (h *Handler) handleProppatch(w http.ResponseWriter, r *http.Request) (statu
 	if !common.CanWrite(user, meta, reqPath) {
 		return http.StatusForbidden, errs.PermissionDenied
 	}
-	if _, err := fs.Get(ctx, reqPath, &fs.GetArgs{}); err != nil {
+	fi, err := fs.Get(ctx, reqPath, &fs.GetArgs{})
+	if err != nil {
 		if errs.IsObjectNotFound(err) {
 			return http.StatusNotFound, err
 		}
@@ -857,9 +858,15 @@ func (h *Handler) handleProppatch(w http.ResponseWriter, r *http.Request) (statu
 	if err != nil {
 		return status, err
 	}
-	pstats, err := patch(ctx, h.LockSystem, reqPath, patches)
+	pstats, handled, err := patchWebDAVTimestamp(ctx, reqPath, fi, patches)
 	if err != nil {
 		return http.StatusInternalServerError, err
+	}
+	if !handled {
+		pstats, err = patch(ctx, h.LockSystem, reqPath, patches)
+		if err != nil {
+			return http.StatusInternalServerError, err
+		}
 	}
 	mw := multistatusWriter{w: w}
 	writeErr := mw.write(makePropstatResponse(r.URL.Path, pstats))
