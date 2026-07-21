@@ -65,6 +65,8 @@
 - `go test ./internal/db ./server/webdav`；
 - Windows amd64 主程序编译。
 
+另外使用实际的 `123Pan` 存储及其上层 `Crypt` 挂载完成了隔离验证：客户端 PUT 传入的修改时间为 Unix `946684800`、创建时间为 `915148800`，而 `/api/fs/list` 强制刷新后返回的上游物理时间为 `1784608458`。自定义 WebDAV 在两次完整进程重启后仍分别返回持久化的 2000/1999 年时间；再以 rclone 使用的 `PROPPATCH DAV:lastmodified` 格式写入 `1462518489` 后，第二次重启仍返回 2016 年时间，而上游物理时间保持为 2026 年。最后执行同目录 MOVE 改名，上游产生新的物理更新时间，但 WebDAV 的 2016 年修改时间随路径一同保留。
+
 ## 当前限制
 
 1. 只有客户端明确发送时间时才能保存时间。测试中，rclone 的 ownCloud WebDAV 模式会发送 `X-OC-Mtime` 和 `PROPPATCH DAV:lastmodified`；当时测试的 Obsidian 与油猴备份没有发送原始时间，因此它们不会凭空得到本地原始时间。
