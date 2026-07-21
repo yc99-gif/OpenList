@@ -27,7 +27,12 @@ jobs:
           cache: true
 
       - name: Run affected package tests
-        run: go test ./internal/db ./server/webdav
+        run: |
+          go test ./internal/db ./server/webdav
+          go test ./internal/net -run '^TestCheck(Read|Write)Preconditions$' -count=1
+
+      - name: Vet affected packages
+        run: go vet ./internal/net ./internal/db ./server/common ./server/webdav
 
   windows-build:
     name: Windows amd64 build
