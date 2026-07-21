@@ -1,0 +1,51 @@
+name: Custom WebDAV mtime checks
+
+on:
+  push:
+    branches:
+      - webdav-mtime
+  pull_request:
+    branches:
+      - webdav-mtime
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  webdav-tests:
+    name: WebDAV metadata tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.4"
+          cache: true
+
+      - name: Run affected package tests
+        run: go test ./internal/db ./server/webdav
+
+  windows-build:
+    name: Windows amd64 build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.4"
+          cache: true
+
+      - name: Build main program
+        shell: pwsh
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          go build -tags=jsoniter -o build/openlist-custom-windows-amd64.exe .
