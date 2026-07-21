@@ -102,6 +102,12 @@ type DeadPropsHolder interface {
 	Patch([]Proppatch) ([]Propstat, error)
 }
 
+type DeadPropsReader interface {
+	DeadProps() (map[xml.Name]Property, error)
+}
+
+var ownCloudChecksumsProperty = xml.Name{Space: "http://owncloud.org/ns", Local: "checksums"}
+
 // liveProps contains all supported properties.
 var liveProps = map[xml.Name]struct {
 	// findFn implements the propfind function of this property. If nil,
@@ -161,7 +167,7 @@ var liveProps = map[xml.Name]struct {
 		findFn: findSupportedLock,
 		dir:    true,
 	},
-	{Space: "http://owncloud.org/ns", Local: "checksums"}: {
+	ownCloudChecksumsProperty: {
 		findFn: findChecksums,
 		dir:    false,
 	},
@@ -186,13 +192,13 @@ func props(ctx context.Context, ls LockSystem, fi model.Obj, pnames []xml.Name) 
 	isDir := fi.IsDir()
 
 	var deadProps map[xml.Name]Property
-	// ??? what is this for?
-	//if dph, ok := f.(DeadPropsHolder); ok {
-	//	deadProps, err = dph.DeadProps()
-	//	if err != nil {
-	//		return nil, err
-	//	}
-	//}
+	if dph, ok := fi.(DeadPropsReader); ok {
+		var err error
+		deadProps, err = dph.DeadProps()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	pstatOK := Propstat{Status: http.StatusOK}
 	pstatNotFound := Propstat{Status: http.StatusNotFound}
@@ -235,13 +241,13 @@ func propnames(ctx context.Context, ls LockSystem, fi model.Obj) ([]xml.Name, er
 	isDir := fi.IsDir()
 
 	var deadProps map[xml.Name]Property
-	// ??? what is this for?
-	//if dph, ok := f.(DeadPropsHolder); ok {
-	//	deadProps, err = dph.DeadProps()
-	//	if err != nil {
-	//		return nil, err
-	//	}
-	//}
+	if dph, ok := fi.(DeadPropsReader); ok {
+		var err error
+		deadProps, err = dph.DeadProps()
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	pnames := make([]xml.Name, 0, len(liveProps)+len(deadProps))
 	for pn, prop := range liveProps {
@@ -395,7 +401,7 @@ func findCreationDate(ctx context.Context, ls LockSystem, name string, fi model.
 	if strings.Contains(strings.ToLower(userAgent), "microsoft-webdav") {
 		return fi.CreateTime().UTC().Format(http.TimeFormat), nil
 	}
-	return fi.CreateTime().UTC().Format(time.RFC3339), nil
+	return fi.CreateTime().UTC().Format(time.RFC3339Nano), nil
 }
 
 // ErrNotImplemented should be returned by optional interfaces if they

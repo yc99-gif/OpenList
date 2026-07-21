@@ -33,7 +33,20 @@ func TestWebDAVMetadataLifecycle(t *testing.T) {
 
 	source := []model.WebDAVMetadata{
 		{Path: "/source", IsDir: true, HasModTime: true, ModTime: modTime},
-		{Path: "/source/file.txt", Size: 12, HasModTime: true, ModTime: modTime, ObjectID: "source-id", HashType: "md5", Hash: "abc"},
+		{
+			Path:               "/source/file.txt",
+			Size:               12,
+			HasModTime:         true,
+			ModTime:            modTime,
+			ModTimeNsec:        time.Unix(modTime, 123).UnixNano(),
+			ObjectID:           "source-id",
+			HashType:           "md5",
+			Hash:               "abc",
+			BackendModTimeNsec: time.Unix(modTime+1, 0).UnixNano(),
+			ContentHashType:    "sha256",
+			ContentHash:        "plaintext-hash",
+			DeadProperties:     `[{"space":"urn:test","local":"revision","inner_xml":"MTc="}]`,
+		},
 		{Path: "/source/sub/file.txt", Size: 8, HasModTime: true, ModTime: modTime},
 		{Path: "/source%/literal.txt", Size: 1, HasModTime: true, ModTime: modTime},
 	}
@@ -75,8 +88,11 @@ func TestWebDAVMetadataLifecycle(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("get copied metadata: found=%v err=%v", found, err)
 	}
-	if copied.ObjectID != "" || copied.Hash != "abc" {
+	if copied.ObjectID != "" || copied.BackendModTimeNsec != 0 || copied.Hash != "abc" {
 		t.Fatalf("copied identity not rewritten correctly: %+v", copied)
+	}
+	if copied.ContentHash != "plaintext-hash" || copied.DeadProperties == "" || copied.ModTimeNsec == 0 {
+		t.Fatalf("copied persistent metadata was lost: %+v", copied)
 	}
 	if _, found, err = GetWebDAVMetadata(ctx, "/source/file.txt"); err != nil || !found {
 		t.Fatalf("copy removed source metadata: found=%v err=%v", found, err)

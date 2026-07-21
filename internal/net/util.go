@@ -68,6 +68,50 @@ const (
 	condFalse
 )
 
+type conditionResponseWriter struct {
+	header http.Header
+}
+
+func (w *conditionResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *conditionResponseWriter) Write([]byte) (int, error) {
+	return 0, nil
+}
+
+func (w *conditionResponseWriter) WriteHeader(int) {}
+
+// CheckWritePreconditions evaluates the conditional headers used by PUT and
+// other state-changing requests against OpenList's representation metadata.
+func CheckWritePreconditions(r *http.Request, etag string, exists bool, modtime time.Time) bool {
+	w := &conditionResponseWriter{header: make(http.Header)}
+	w.header.Set("Etag", etag)
+
+	if r.Header.Get("If-Match") != "" {
+		if !exists {
+			r.Header.Del("If-Match")
+			return false
+		}
+		if checkIfMatch(w, r) == condFalse {
+			return false
+		}
+	} else if exists && checkIfUnmodifiedSince(r, modtime) == condFalse {
+		return false
+	}
+
+	if r.Header.Get("If-None-Match") != "" {
+		if !exists {
+			r.Header.Del("If-None-Match")
+			return true
+		}
+		if checkIfNoneMatch(w, r) == condFalse {
+			return false
+		}
+	}
+	return true
+}
+
 func checkIfMatch(w http.ResponseWriter, r *http.Request) condResult {
 	im := r.Header.Get("If-Match")
 	if im == "" {
@@ -270,6 +314,19 @@ func checkPreconditions(w http.ResponseWriter, r *http.Request, modtime time.Tim
 		rangeHeader = ""
 	}
 	return false, rangeHeader
+}
+
+// CheckPreconditions evaluates HTTP conditional headers before a caller
+// proxies a request to an upstream whose ETag may differ from OpenList's.
+// It also normalizes the Range header after evaluating If-Range.
+func CheckPreconditions(w http.ResponseWriter, r *http.Request, modtime time.Time) bool {
+	done, rangeHeader := checkPreconditions(w, r, modtime)
+	if rangeHeader == "" {
+		r.Header.Del("Range")
+	} else {
+		r.Header.Set("Range", rangeHeader)
+	}
+	return done
 }
 
 func sumRangesSize(ranges []http_range.Range) (size int64) {

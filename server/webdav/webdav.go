@@ -249,6 +249,7 @@ func (h *Handler) handleGetHeadPost(w http.ResponseWriter, r *http.Request) (sta
 	} else if found {
 		fi = applyWebDAVMetadata(ctx, reqPath, fi, metadata)
 	}
+	fi = wrapWebDAVObj(fi)
 	if fi.IsDir() {
 		if r.Method == http.MethodHead {
 			w.Header().Set("Content-Type", "httpd/unix-directory")
@@ -256,6 +257,13 @@ func (h *Handler) handleGetHeadPost(w http.ResponseWriter, r *http.Request) (sta
 			return http.StatusOK, nil
 		}
 		return http.StatusMethodNotAllowed, nil
+	}
+	w.Header().Set("Etag", common.GetEtag(fi, fi.GetSize()))
+	if !fi.ModTime().IsZero() {
+		w.Header().Set("Last-Modified", fi.ModTime().UTC().Format(http.TimeFormat))
+	}
+	if net.CheckPreconditions(w, r, fi.ModTime()) {
+		return 0, nil
 	}
 	// Let ServeContent determine the Content-Type header.
 	storage, _ := fs.GetStorage(reqPath, &fs.GetStoragesArgs{})
@@ -364,8 +372,6 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request) (status int,
 		return status, err
 	}
 	defer release()
-	// TODO(rost): Support the If-Match, If-None-Match headers? See bradfitz'
-	// comments in http.checkEtag.
 	ctx := r.Context()
 	user := ctx.Value(conf.UserKey).(*model.User)
 	reqPath, err = user.JoinPath(reqPath)
@@ -404,10 +410,40 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request) (status int,
 	if !common.CanWrite(user, parentMeta, parentPath) {
 		return http.StatusForbidden, errs.PermissionDenied
 	}
+
+	var existingMetadata *model.WebDAVMetadata
+	existingObj, getErr := fs.Get(ctx, reqPath, &fs.GetArgs{})
+	existed := getErr == nil
+	if getErr != nil && !errs.IsObjectNotFound(getErr) && !errs.IsNotFoundError(getErr) {
+		return http.StatusMethodNotAllowed, getErr
+	}
+	if existed {
+		metadata, found, metadataErr := db.GetWebDAVMetadata(ctx, reqPath)
+		if metadataErr != nil {
+			return http.StatusInternalServerError, metadataErr
+		}
+		if found && webDAVMetadataMatchesObj(metadata, existingObj) {
+			existingMetadata = metadata
+			existingObj = applyWebDAVMetadata(ctx, reqPath, existingObj, metadata)
+		}
+		existingObj = wrapWebDAVObj(existingObj)
+	}
+	currentETag := ""
+	currentModTime := time.Time{}
+	if existed {
+		currentETag = common.GetEtag(existingObj, existingObj.GetSize())
+		currentModTime = existingObj.ModTime()
+	}
+	if !net.CheckWritePreconditions(r, currentETag, existed, currentModTime) {
+		return http.StatusPreconditionFailed, nil
+	}
+
+	plainHasher := utils.NewMultiHasher([]*utils.HashType{utils.SHA256})
 	fsStream := &stream.FileStream{
-		Obj:      &obj,
-		Reader:   r.Body,
-		Mimetype: r.Header.Get("Content-Type"),
+		Obj:               &obj,
+		Reader:            io.TeeReader(r.Body, plainHasher),
+		Mimetype:          r.Header.Get("Content-Type"),
+		ForceStreamUpload: true,
 	}
 	if fsStream.Mimetype == "" {
 		fsStream.Mimetype = utils.GetMimeType(reqPath)
@@ -425,16 +461,36 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request) (status int,
 	if err != nil {
 		fi = &obj
 	}
-	if times.hasModTime || times.hasCreateTime {
-		metadata := newWebDAVMetadata(reqPath, fi)
-		metadata.ModTime = times.modTime.Unix()
-		metadata.CreateTime = times.createTime.Unix()
-		metadata.HasModTime = times.hasModTime
-		metadata.HasCreateTime = times.hasCreateTime
+	metadata := newWebDAVMetadata(reqPath, fi)
+	// Some providers initially echo the client timestamp and only expose their
+	// physical upload timestamp after caches settle. Bind that physical identity
+	// on a later read instead of invalidating fresh WebDAV metadata immediately.
+	metadata.BackendModTimeNsec = 0
+	if existingMetadata != nil {
+		metadata.DeadProperties = existingMetadata.DeadProperties
+		metadata.CreatedAt = existingMetadata.CreatedAt
+		if !times.hasCreateTime && existingMetadata.HasCreateTime {
+			metadata.CreateTime = existingMetadata.CreateTime
+			metadata.CreateTimeNsec = existingMetadata.CreateTimeNsec
+			metadata.HasCreateTime = true
+		}
+	}
+	if times.hasModTime {
+		setWebDAVModTime(&metadata, times.modTime)
+	}
+	if times.hasCreateTime {
+		setWebDAVCreateTime(&metadata, times.createTime)
+	}
+	hashedSize := plainHasher.Size()
+	if (size < 0 || size == hashedSize) && (fi.GetSize() < 0 || fi.GetSize() == hashedSize) {
+		metadata.ContentHashType = utils.SHA256.Name
+		metadata.ContentHash = plainHasher.GetHashInfo().GetHash(utils.SHA256)
+	}
+	if webDAVMetadataHasState(&metadata) {
 		if err = db.UpsertWebDAVMetadata(ctx, &metadata); err != nil {
 			return http.StatusInternalServerError, err
 		}
-		fi = applyWebDAVMetadata(ctx, reqPath, fi, &metadata)
+		fi = &webDAVMetadataObj{Obj: fi, metadata: metadata}
 	} else if err = db.DeleteWebDAVMetadata(ctx, reqPath); err != nil {
 		return http.StatusInternalServerError, err
 	}
@@ -443,7 +499,12 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request) (status int,
 		return http.StatusInternalServerError, err
 	}
 	w.Header().Set("Etag", etag)
-	return http.StatusCreated, nil
+	if existed {
+		w.WriteHeader(http.StatusNoContent)
+		return 0, nil
+	}
+	w.WriteHeader(http.StatusCreated)
+	return 0, nil
 }
 
 func (h *Handler) handleMkcol(w http.ResponseWriter, r *http.Request) (status int, err error) {
@@ -467,6 +528,7 @@ func (h *Handler) handleMkcol(w http.ResponseWriter, r *http.Request) (status in
 	if r.ContentLength > 0 {
 		return http.StatusUnsupportedMediaType, nil
 	}
+	times := h.getRequestTimes(r)
 
 	// RFC 4918 9.3.1
 	//405 (Method Not Allowed) - MKCOL can only be executed on an unmapped URL
@@ -498,7 +560,30 @@ func (h *Handler) handleMkcol(w http.ResponseWriter, r *http.Request) (status in
 		}
 		return http.StatusMethodNotAllowed, err
 	}
-	if err := db.DeleteWebDAVMetadata(ctx, reqPath); err != nil {
+	if times.hasModTime || times.hasCreateTime {
+		fi, getErr := fs.Get(ctx, reqPath, &fs.GetArgs{})
+		if getErr != nil {
+			fi = &model.Object{
+				Name:     path.Base(reqPath),
+				IsFolder: true,
+				Modified: times.modTime,
+				Ctime:    times.createTime,
+			}
+		}
+		metadata := newWebDAVMetadata(reqPath, fi)
+		// As with PUT, a provider may initially echo the requested directory
+		// timestamp before exposing its physical timestamp.
+		metadata.BackendModTimeNsec = 0
+		if times.hasModTime {
+			setWebDAVModTime(&metadata, times.modTime)
+		}
+		if times.hasCreateTime {
+			setWebDAVCreateTime(&metadata, times.createTime)
+		}
+		if err := db.UpsertWebDAVMetadata(ctx, &metadata); err != nil {
+			return http.StatusInternalServerError, err
+		}
+	} else if err := db.DeleteWebDAVMetadata(ctx, reqPath); err != nil {
 		return http.StatusInternalServerError, err
 	}
 	return http.StatusCreated, nil
@@ -789,12 +874,9 @@ func (h *Handler) handlePropfind(w http.ResponseWriter, r *http.Request) (status
 	if err != nil {
 		return status, err
 	}
-	metadataByPath := map[string]model.WebDAVMetadata{}
-	if pf.Propname == nil {
-		metadataByPath, err = loadWebDAVMetadata(ctx, reqPath, depth)
-		if err != nil {
-			return http.StatusInternalServerError, err
-		}
+	metadataByPath, err := loadWebDAVMetadata(ctx, reqPath, depth)
+	if err != nil {
+		return http.StatusInternalServerError, err
 	}
 
 	mw := multistatusWriter{w: w}
@@ -818,7 +900,7 @@ func (h *Handler) handlePropfind(w http.ResponseWriter, r *http.Request) (status
 			}
 			pstats = append(pstats, pstat)
 		} else if pf.Allprop != nil {
-			pstats, err = allprop(ctx, h.LockSystem, info, pf.Prop)
+			pstats, err = allprop(ctx, h.LockSystem, info, pf.Include)
 		} else {
 			pstats, err = props(ctx, h.LockSystem, info, pf.Prop)
 		}
@@ -878,15 +960,9 @@ func (h *Handler) handleProppatch(w http.ResponseWriter, r *http.Request) (statu
 	if err != nil {
 		return status, err
 	}
-	pstats, handled, err := patchWebDAVTimestamp(ctx, reqPath, fi, patches)
+	pstats, err := patchWebDAVProperties(ctx, reqPath, fi, patches)
 	if err != nil {
 		return http.StatusInternalServerError, err
-	}
-	if !handled {
-		pstats, err = patch(ctx, h.LockSystem, reqPath, patches)
-		if err != nil {
-			return http.StatusInternalServerError, err
-		}
 	}
 	mw := multistatusWriter{w: w}
 	writeErr := mw.write(makePropstatResponse(r.URL.Path, pstats))

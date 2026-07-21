@@ -59,6 +59,12 @@ func Proxy(w http.ResponseWriter, r *http.Request, link *model.Link, file model.
 	defer res.Body.Close()
 
 	maps.Copy(w.Header(), res.Header)
+	if etagProvider, ok := file.(interface{ GetETag() string }); ok {
+		w.Header().Set("Etag", etagProvider.GetETag())
+		if !file.ModTime().IsZero() {
+			w.Header().Set("Last-Modified", file.ModTime().UTC().Format(http.TimeFormat))
+		}
+	}
 	w.WriteHeader(res.StatusCode)
 	if r.Method == http.MethodHead {
 		return nil
@@ -87,6 +93,11 @@ func attachHeader(w http.ResponseWriter, file model.Obj, link *model.Link) {
 	}
 }
 func GetEtag(file model.Obj, size int64) string {
+	if etagProvider, ok := file.(interface{ GetETag() string }); ok {
+		if etag := etagProvider.GetETag(); etag != "" {
+			return etag
+		}
+	}
 	hash := ""
 	for _, v := range file.GetHash().Export() {
 		if v > hash {

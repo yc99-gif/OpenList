@@ -49,6 +49,8 @@ func UpsertWebDAVMetadata(ctx context.Context, metadata *model.WebDAVMetadata) e
 			"parent_hash",
 			"mod_time",
 			"create_time",
+			"mod_time_nsec",
+			"create_time_nsec",
 			"has_mod_time",
 			"has_create_time",
 			"size",
@@ -56,6 +58,10 @@ func UpsertWebDAVMetadata(ctx context.Context, metadata *model.WebDAVMetadata) e
 			"object_id",
 			"hash_type",
 			"hash",
+			"backend_mod_time_nsec",
+			"content_hash_type",
+			"content_hash",
+			"dead_properties",
 			"updated_at",
 		}),
 	}).Create(metadata).Error)
@@ -214,6 +220,7 @@ func rewriteWebDAVMetadataTree(records []model.WebDAVMetadata, src, dst string) 
 		}
 		metadata.Path = normalizeWebDAVMetadataPath(dst + suffix)
 		metadata.ObjectID = ""
+		metadata.BackendModTimeNsec = 0
 		metadata.CreatedAt = time.Time{}
 		prepareWebDAVMetadata(&metadata)
 		result = append(result, metadata)
