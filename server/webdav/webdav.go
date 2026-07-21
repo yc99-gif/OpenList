@@ -338,6 +338,9 @@ func (h *Handler) handleDelete(w http.ResponseWriter, r *http.Request) (status i
 	if err := fs.Remove(ctx, reqPath); err != nil {
 		return http.StatusMethodNotAllowed, err
 	}
+	if err := db.DeleteWebDAVMetadataTree(ctx, reqPath); err != nil {
+		return http.StatusInternalServerError, err
+	}
 	//fs.ClearCache(path.Dir(reqPath))
 	return http.StatusNoContent, nil
 }
@@ -495,6 +498,9 @@ func (h *Handler) handleMkcol(w http.ResponseWriter, r *http.Request) (status in
 		}
 		return http.StatusMethodNotAllowed, err
 	}
+	if err := db.DeleteWebDAVMetadata(ctx, reqPath); err != nil {
+		return http.StatusInternalServerError, err
+	}
 	return http.StatusCreated, nil
 }
 
@@ -562,7 +568,14 @@ func (h *Handler) handleCopyMove(w http.ResponseWriter, r *http.Request) (status
 				return http.StatusBadRequest, errInvalidDepth
 			}
 		}
-		return copyFiles(ctx, src, dst, r.Header.Get("Overwrite") != "F")
+		status, err = copyFiles(ctx, src, dst, r.Header.Get("Overwrite") != "F")
+		if err != nil {
+			return status, err
+		}
+		if err = db.CopyWebDAVMetadataTree(ctx, src, dst); err != nil {
+			return http.StatusInternalServerError, err
+		}
+		return status, nil
 	}
 
 	release, status, err := h.confirmLocks(r, src, dst)
@@ -579,7 +592,14 @@ func (h *Handler) handleCopyMove(w http.ResponseWriter, r *http.Request) (status
 			return http.StatusBadRequest, errInvalidDepth
 		}
 	}
-	return moveFiles(ctx, src, dst, r.Header.Get("Overwrite") == "T")
+	status, err = moveFiles(ctx, src, dst, r.Header.Get("Overwrite") == "T")
+	if err != nil {
+		return status, err
+	}
+	if err = db.MoveWebDAVMetadataTree(ctx, src, dst); err != nil {
+		return http.StatusInternalServerError, err
+	}
+	return status, nil
 }
 
 func (h *Handler) handleLock(w http.ResponseWriter, r *http.Request) (retStatus int, retErr error) {
