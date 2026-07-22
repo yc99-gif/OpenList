@@ -31,6 +31,13 @@ else
   webVersion=$(eval "curl -fsSL --max-time 2 $githubAuthArgs \"https://api.github.com/repos/$frontendRepo/releases/latest\"" | grep "tag_name" | head -n 1 | awk -F ":" '{print $2}' | sed 's/\"//g;s/,//g;s/ //g')
 fi
 
+# Custom release workflows can provide an explicit semantic backend version
+# without creating an upstream-style v* tag (which would also trigger the
+# project's full official release pipelines). The normal upstream behavior is
+# unchanged when these variables are not set.
+version="${OPENLIST_BUILD_VERSION:-$version}"
+webVersion="${OPENLIST_WEB_VERSION:-$webVersion}"
+
 echo "backend version: $version"
 echo "frontend version: $webVersion"
 if [ "$useLite" = true ]; then
@@ -226,6 +233,18 @@ PrepareBuildDockerMusl() {
   done
 }
 
+# The custom server image only targets linux/amd64. Keep this separate from
+# the official multi-platform release path so a personal deployment does not
+# download seven unused cross-compilers or build unrelated architectures.
+PrepareBuildDockerMuslAmd64() {
+  mkdir -p build/musl-libs
+  local archive="build/x86_64-linux-musl-cross.tgz"
+  curl -fsSL -o "$archive" \
+    "https://github.com/OpenListTeam/musl-compilers/releases/latest/download/x86_64-linux-musl-cross.tgz"
+  tar xf "$archive" --strip-components 1 -C build/musl-libs
+  rm -f "$archive"
+}
+
 BuildDockerMultiplatform() {
   go mod download
 
@@ -265,6 +284,25 @@ BuildDockerMultiplatform() {
     CGO_LDFLAGS="-static" go build -o build/${docker_arch%%-*}/${docker_arch##*-}/"$appName" -ldflags="$docker_lflags" -tags=jsoniter .
     AssertStaticBinary "build/${docker_arch%%-*}/${docker_arch##*-}/$appName"
   done
+}
+
+BuildDockerAmd64() {
+  go mod download
+
+  export PATH=$PATH:$PWD/build/musl-libs/bin
+  export GOOS=linux
+  export GOARCH=amd64
+  export CC=x86_64-linux-musl-gcc
+  export CGO_ENABLED=1
+
+  local output="build/linux/amd64/$appName"
+  local docker_lflags
+  local build_tags
+  docker_lflags="$(GetMuslStaticLdflags)"
+  build_tags="$(GetBuildTagsForTarget linux-amd64)"
+  mkdir -p "$(dirname "$output")"
+  CGO_LDFLAGS="-static" go build -o "$output" -ldflags="$docker_lflags" -tags="$build_tags" .
+  AssertStaticBinary "$output"
 }
 
 BuildRelease() {
@@ -620,7 +658,7 @@ for arg in "$@"; do
         buildType="$arg"
       fi
       ;;
-    docker|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web)
+    docker|docker-amd64|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web)
       if [ -z "$dockerType" ]; then
         dockerType="$arg"
       fi
@@ -640,6 +678,8 @@ if [ "$buildType" = "dev" ]; then
   FetchWebRolling
   if [ "$dockerType" = "docker" ]; then
     BuildDocker
+  elif [ "$dockerType" = "docker-amd64" ]; then
+    BuildDockerAmd64
   elif [ "$dockerType" = "docker-multiplatform" ]; then
       BuildDockerMultiplatform
   elif [ "$dockerType" = "web" ]; then
@@ -655,6 +695,8 @@ elif [ "$buildType" = "release" -o "$buildType" = "beta" ]; then
   fi
   if [ "$dockerType" = "docker" ]; then
     BuildDocker
+  elif [ "$dockerType" = "docker-amd64" ]; then
+    BuildDockerAmd64
   elif [ "$dockerType" = "docker-multiplatform" ]; then
     BuildDockerMultiplatform
   elif [ "$dockerType" = "linux_musl_arm" ]; then
@@ -696,7 +738,9 @@ elif [ "$buildType" = "release" -o "$buildType" = "beta" ]; then
     fi
   fi
 elif [ "$buildType" = "prepare" ]; then
-  if [ "$dockerType" = "docker-multiplatform" ]; then
+  if [ "$dockerType" = "docker-amd64" ]; then
+    PrepareBuildDockerMuslAmd64
+  elif [ "$dockerType" = "docker-multiplatform" ]; then
     PrepareBuildDockerMusl
   fi
 elif [ "$buildType" = "zip" ]; then
@@ -721,7 +765,7 @@ elif [ "$buildType" = "zip" ]; then
   fi
 else
   echo -e "Parameter error"
-  echo -e "Usage: $0 {dev|beta|release|zip|prepare} [docker|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web] [lite] [other_params]"
+  echo -e "Usage: $0 {dev|beta|release|zip|prepare} [docker|docker-amd64|docker-multiplatform|linux_musl_arm|linux_musl|android|freebsd|web] [lite] [other_params]"
   echo -e "Examples:"
   echo -e "  $0 dev"
   echo -e "  $0 dev lite"
